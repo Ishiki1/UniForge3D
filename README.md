@@ -32,9 +32,6 @@ Run all cases using the pretrained model:
 python infer.py
 ```
 
-Results are saved to `outputs/<case>/prediction.glb`.
-Use `--model` for another Hub repository or local model directory, or `--config` for a local JSON configuration.
-Local checkpoint paths in `--config` are relative to the repository's `weights/` directory unless `weights_root` is provided through the Python API.
 
 
 ## Citation
