@@ -7,6 +7,8 @@ UniForge3D generates complete 3D assets from sparse, unposed multi-view images. 
 ## Installation
 
 ```bash
+git clone https://github.com/xibushu/UniForge3D.git
+cd UniForge3D
 bash setup.sh
 conda activate uniforge3d
 ```
