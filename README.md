@@ -1,5 +1,9 @@
 # UniForge3D: Joint 3D Reconstruction and Generation in a Shared Anchor-Guided Space
 
+[![Project Page](https://img.shields.io/badge/Project-Page-4285F4?style=flat&logo=googlechrome&logoColor=white)](https://xishuxishu.github.io/uniforge3d-project/)
+[![Hugging Face](https://img.shields.io/badge/Hugging_Face-Models-FFD21E?style=flat&logo=huggingface&logoColor=FFD21E)](https://huggingface.co/xibushu/UniForge3D)
+![Paper Coming Soon](https://img.shields.io/badge/Paper-Coming_Soon-999999?style=flat&logo=arxiv&logoColor=white)
+
 ![UniForge3D teaser](assets/teaser.png)
 
 UniForge3D generates complete 3D assets from sparse, unposed multi-view images. It jointly models reconstruction and generation in a shared anchor-guided space, then uses structure-guided view selection to preserve observed details. 
