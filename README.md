@@ -52,4 +52,7 @@ python infer.py
 
 ## Acknowledgements
 
-Built on [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) and [VGGT](https://github.com/facebookresearch/vggt).
+Our code is based on these wonderful works:
+
+- [TRELLIS.2](https://github.com/microsoft/TRELLIS.2)
+- [VGGT](https://github.com/facebookresearch/vggt)
