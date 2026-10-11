@@ -40,16 +40,6 @@ python infer.py
 
 
 
-## Citation
-
-```bibtex
-@misc{chen2026uniforge3d,
-  title={UniForge3D: Joint 3D Reconstruction and Generation in a Shared Anchor-Guided Space},
-  author={Chen, Wenjue and Chen, Wenyue and Zheng, Heliang and Jia, Rongfei and Liu, Yuan and Li, Meng},
-  year={2026}
-}
-```
-
 ## Acknowledgements
 
 Our code is based on these wonderful works:
