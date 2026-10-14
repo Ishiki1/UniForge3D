@@ -58,14 +58,11 @@ Our code is based on these wonderful works:
 If you find UniForge3D useful in your research, please cite our [paper](https://arxiv.org/abs/2610.15357):
 
 ```bibtex
-@misc{chen2026uniforge3djoint3dreconstruction,
-  title={UniForge3D: Joint 3D Reconstruction and Generation in a Shared Anchor-Guided Space},
-  author={Wenjue Chen and Wenyue Chen and Heliang Zheng and Rongfei Jia and Yuan Liu and Meng Li},
-  year={2026},
-  eprint={2610.15357},
-  archivePrefix={arXiv},
-  primaryClass={cs.CV},
-  url={https://arxiv.org/abs/2610.15357},
+@article{chen2026uniforge3d,
+  title   = {UniForge3D: Joint 3D Reconstruction and Generation in a Shared Anchor-Guided Space},
+  author  = {Chen, Wenjue and Chen, Wenyue and Zheng, Heliang and Jia, Rongfei and Liu, Yuan and Li, Meng},
+  journal = {arXiv preprint arXiv:2610.15357},
+  year    = {2026}
 }
 ```
 
