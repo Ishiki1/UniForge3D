@@ -53,6 +53,24 @@ Our code is based on these wonderful works:
 - [TRELLIS.2](https://github.com/microsoft/TRELLIS.2)
 - [VGGT](https://github.com/facebookresearch/vggt)
 
+## License
+
+Original UniForge3D source code is released under the
+[MIT License](LICENSE). Third-party code, dependencies, and model
+weights retain their respective licenses and are not relicensed
+under this project's MIT License. Please refer to their original
+license files and notices for applicable terms.
+
+The MIT License for our source code does not apply to the released
+model weights. In particular, our VGGT-derived checkpoints were
+initialized from
+[facebook/VGGT-1B](https://huggingface.co/facebook/VGGT-1B)
+and remain subject to
+[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/).
+The default background remover,
+[BRIA RMBG-2.0](https://huggingface.co/briaai/RMBG-2.0),
+requires separate authorization for commercial use.
+
 ## Citation
 
 If you find UniForge3D useful in your research, please cite our [paper](https://arxiv.org/abs/2610.15357):
