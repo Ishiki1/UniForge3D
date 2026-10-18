@@ -155,11 +155,37 @@ correctly refused grid64; the final 512 MiB setting also covers the four-view
 production all-view case. That refusal was corrected by an explicit budget
 choice, with no removed views or precision reduction.
 
+## Bounded native MPS evidence
+
+On 18 October 2026, a separately bounded native probe of reviewed commit
+`be5509b52ef2c1ec06d28307ae27c7d74c5b8cb2` passed **14/14 cases** in a
+4.881-second process run on macOS 26.6.2 arm64, Python 3.11.15 and PyTorch
+2.12.0. The resource guard was released after execution. This was a small
+operator probe with synthetic inputs and no trained weights.
+
+- Packed attention retained all 1,029 or 4,101 keys with 12 heads × 128 channels
+  and 19 queries. Float32, float16 and bfloat16 results were compared against an
+  independent CPU float64 softmax oracle using the same quantized inputs.
+- Four-view full attention retained all 4,116 or 16,404 keys at the same head
+  dimensions and matched an analytic uniform-attention reference with distinct
+  view contributions.
+- The real routed module passed in all three dtypes at both grids, using nine
+  queries, three active views and a deliberately reduced conditioning width of
+  four. Its comparison was against the same public CPU module, whose semantics
+  were independently oracle-tested by the CPU suite above. Routing metadata
+  matched exactly; output dtype and `mps:0` device were checked.
+
+Generic MPS CPU fallback was disabled. These results establish this bounded MPS
+execution path; they do not identify or certify every underlying native kernel.
+The recorded **process peak RSS was 1,131,102,208 bytes**. That value is neither
+GPU peak memory nor a full-model memory estimate. It also does not turn the
+score/workspace estimate above into a measured memory ceiling.
+
 ## Remaining proof gates
 
-This does not establish MPS execution, MPS performance/peak memory, CUDA parity,
-real-checkpoint loading, full model execution, final geometry/PBR fidelity or
-an engine-ready game asset. Independent source review precedes a separately
-bounded MPS probe. Device/precision policy, conditioning, sparse convolution,
-mesh extraction, texture baking and full stage execution remain subsequent
-adapter work. Full geometry and textures remain the destination.
+The narrow MPS probe does not establish large-workload performance or GPU peak
+memory, CUDA parity, real-checkpoint loading, full model execution, final
+geometry/PBR fidelity or an engine-ready game asset. Device/precision policy,
+conditioning, sparse convolution, mesh extraction, texture baking and full
+stage execution remain subsequent adapter work. Full geometry and textures
+remain the destination.
