@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from ..utils.device import autocast_for_device
 
 from .vggt.heads.dpt_head import DPTHead, custom_interpolate
 from .vggt.heads.head_act import activate_head
@@ -83,9 +84,9 @@ class FrozenRoutedVGGTFeatureExtractor(FrozenVGGTFeatureExtractor):
         cached, patch_start = super().__call__(images, shape_coords, shape_offsets)
         if not return_points:
             return cached, patch_start, None, None
-        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=self.dtype, enabled=True):
+        with torch.no_grad(), autocast_for_device(self.device, self.dtype):
             shape_tokens = self.shape_encoder(shape_coords.to(self.device))
-        with torch.no_grad(), torch.autocast(device_type="cuda", enabled=False):
+        with torch.no_grad(), autocast_for_device(self.device, torch.float32):
             points, confidence = self._point_forward(
                 cached,
                 images.to(self.device),

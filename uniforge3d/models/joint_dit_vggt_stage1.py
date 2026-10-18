@@ -338,7 +338,7 @@ class JointDiTVGGTStage1Model(nn.Module):
                 stage_blocks = self.dit_stage_blocks[stage_start_block]
                 global_tokens_raw = global_tokens
                 while next_dit_block < stage_start_block:
-                    h = self.dit.blocks[next_dit_block](h, t_mod, cond, self.dit.rope_phases)
+                    h = self.dit.blocks[next_dit_block](h, t_mod, cond, self.dit.get_rope_phases())
                     next_dit_block += 1
 
                 cond_patch_tokens = int(dino_cond_bank.shape[2]) - 5
@@ -355,7 +355,7 @@ class JointDiTVGGTStage1Model(nn.Module):
                         raise RuntimeError(f"Expected DiT block {block_idx}, got {next_dit_block}")
                     fused_cond = self.cond_delta_mlps[str(block_idx)](dino_cond_bank, aligned_vggt)
                     block_context = self._flatten_condition(fused_cond, self.dit.dtype)
-                    h = self.dit.blocks[block_idx](h, t_mod, block_context, self.dit.rope_phases)
+                    h = self.dit.blocks[block_idx](h, t_mod, block_context, self.dit.get_rope_phases())
                     next_dit_block += 1
 
                 # Write the completed DiT stage back to the VGGT global stream.
@@ -373,7 +373,7 @@ class JointDiTVGGTStage1Model(nn.Module):
 
         while next_dit_block < len(self.dit.blocks):
             block = self.dit.blocks[next_dit_block]
-            h = block(h, t_mod, cond, self.dit.rope_phases)
+            h = block(h, t_mod, cond, self.dit.get_rope_phases())
             next_dit_block += 1
 
         h = manual_cast(h, x.dtype)

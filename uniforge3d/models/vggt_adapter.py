@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from uniforge3d.models.vggt.models.aggregator import Aggregator
+from uniforge3d.utils.device import autocast_for_device, resolve_device
 
 FUSION_LAYERS = (4, 7, 11, 14, 17, 20, 23)
 
@@ -169,7 +170,7 @@ class FrozenVGGTFeatureExtractor:
         if dtype_key not in _DTYPES:
             raise ValueError(f"Unsupported frozen VGGT dtype {dtype!r}; choose from {sorted(_DTYPES)}")
         self.dtype = _DTYPES[dtype_key]
-        self.device = torch.device(device)
+        self.device = resolve_device(device)
         self.shape_grid_resolution = int(shape_grid_resolution)
         if self.shape_grid_resolution != 64:
             raise ValueError(
@@ -338,14 +339,9 @@ class FrozenVGGTFeatureExtractor:
         coord_max = int(shape_coords.max())
         if coord_min < 0 or coord_max >= self.shape_grid_resolution:
             raise ValueError(f"coords64 values must be in [0,63], got min={coord_min} max={coord_max}")
-        autocast_enabled = self.device.type == "cuda" and self.dtype != torch.float32
         with (
             torch.no_grad(),
-            torch.autocast(
-                device_type=self.device.type,
-                dtype=self.dtype,
-                enabled=autocast_enabled,
-            ),
+            autocast_for_device(self.device, self.dtype),
         ):
             shape_tokens = self.shape_encoder(shape_coords.to(device=self.device, non_blocking=True))
             tokens, patch_start_idx = self._conditioned_aggregate(

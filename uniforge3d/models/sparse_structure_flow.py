@@ -145,6 +145,63 @@ class SparseStructureFlowModel(nn.Module):
         """
         return next(self.parameters()).device
 
+    def prepare_rope_device(self, device: torch.device) -> None:
+        """Declare the next transfer without changing persistent phase data."""
+        device = torch.device(device)
+        self._rope_runtime_device = device if device.type == "mps" else None
+        self._rope_runtime_cache = None
+        self._rope_runtime_signature = None
+
+    def _apply(self, fn, recurse=True):
+        self._rope_runtime_cache = None
+        self._rope_runtime_signature = None
+        target = self.__dict__.get("_rope_runtime_device")
+        phases = self._buffers.get("rope_phases")
+        if target is None or phases is None or not phases.is_complex():
+            return super()._apply(fn, recurse=recurse)
+        # Module.to recursively transforms buffers. MPS cannot accept this
+        # persistent complex buffer; keep it intact on the explicit CPU
+        # checkpoint boundary and expose real pairs through the accessor.
+        self._buffers["rope_phases"] = None
+        try:
+            result = super()._apply(fn, recurse=recurse)
+        finally:
+            self._buffers["rope_phases"] = phases
+        if self.device.type == "mps":
+            self._buffers["rope_phases"] = phases.cpu()
+            self._rope_runtime_device = self.device
+        else:
+            # Also handle a direct .cpu()/.cuda() after an MPS execution.
+            self._buffers["rope_phases"] = fn(phases)
+            self._rope_runtime_device = None
+        return result
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        self._rope_runtime_cache = None
+        self._rope_runtime_signature = None
+        return super()._load_from_state_dict(*args, **kwargs)
+
+    def _real_rope_phases(self, device: torch.device) -> torch.Tensor:
+        """Build/cache a nonpersistent real view without changing checkpoint keys."""
+        phases = self._buffers["rope_phases"]
+        try:
+            version = phases._version
+        except RuntimeError:  # inference tensors have no version counter
+            version = None
+        signature = (id(phases), version, torch.device(device))
+        if version is None or self.__dict__.get("_rope_runtime_signature") != signature:
+            self._rope_runtime_cache = torch.view_as_real(phases).contiguous().to(device)
+            self._rope_runtime_signature = signature
+        return self._rope_runtime_cache
+
+    def get_rope_phases(self) -> Optional[torch.Tensor]:
+        """Return original CPU/CUDA phases or exact real-pair MPS runtime phases."""
+        phases = self.rope_phases
+        if phases is None:
+            return None
+        target = self.__dict__.get("_rope_runtime_device")
+        return phases if target is None else self._real_rope_phases(target)
+
     def convert_to(self, dtype: torch.dtype) -> None:
         """
         Convert the torso of the model to the specified dtype.
@@ -236,7 +293,7 @@ class SparseStructureFlowModel(nn.Module):
         h = manual_cast(h, self.dtype)
         cond = manual_cast(cond, self.dtype)
         for block in self.blocks:
-            h = block(h, t_emb, cond, self.rope_phases)
+            h = block(h, t_emb, cond, self.get_rope_phases())
         h = manual_cast(h, x.dtype)
         h = F.layer_norm(h, h.shape[-1:])
         h = self.out_layer(h)

@@ -69,7 +69,7 @@ def manual_cast(tensor, dtype):
     """
     Cast if autocast is not enabled.
     """
-    if not torch.is_autocast_enabled():
+    if not torch.is_autocast_enabled(tensor.device.type):
         return tensor.type(dtype)
     return tensor
 

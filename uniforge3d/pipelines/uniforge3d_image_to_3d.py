@@ -12,7 +12,10 @@ import trimesh
 from huggingface_hub import snapshot_download
 
 from ..models.loaders import load_models, resolve_checkpoint
-from ..utils.device import release_cuda
+from ..utils.device import (
+    autocast_for_device, configure_inference_device, move_model_to_device,
+    release_device, select_current_device,
+)
 from ..utils.mesh import (
     display_to_model,
     export_glb,
@@ -39,13 +42,13 @@ class UniForge3DImageTo3DPipeline:
         self,
         config: dict,
         *,
-        device: int = 0,
+        device: int | str | torch.device = 0,
         low_vram: bool = True,
         cache_dir: str | Path | None = None,
         local_files_only: bool = False,
     ) -> None:
         self.config = config
-        self.device = torch.device("cuda", int(device))
+        self.device = configure_inference_device(device)
         self.low_vram = low_vram
 
         with torch.device("cpu"):
@@ -69,7 +72,7 @@ class UniForge3DImageTo3DPipeline:
 
     @classmethod
     def from_pretrained(
-        cls, path: str | Path, *, device: int = 0, low_vram: bool = True,
+        cls, path: str | Path, *, device: int | str | torch.device = 0, low_vram: bool = True,
         revision: str | None = None, cache_dir: str | Path | None = None,
         local_files_only: bool = False,
     ) -> "UniForge3DImageTo3DPipeline":
@@ -89,7 +92,7 @@ class UniForge3DImageTo3DPipeline:
 
     @classmethod
     def from_config(
-        cls, config_path: str | Path, *, device: int = 0, low_vram: bool = True,
+        cls, config_path: str | Path, *, device: int | str | torch.device = 0, low_vram: bool = True,
         weights_root: str | Path | None = None,
         cache_dir: str | Path | None = None, local_files_only: bool = False,
     ) -> "UniForge3DImageTo3DPipeline":
@@ -121,13 +124,13 @@ class UniForge3DImageTo3DPipeline:
 
         try:
             for model in models:
-                model.to(self.device)
+                move_model_to_device(model, self.device)
             yield
         finally:
             if self.low_vram:
                 for model in models:
-                    model.to("cpu")
-                release_cuda()
+                    move_model_to_device(model, "cpu")
+                release_device(self.device)
 
     def _preprocess_images(self, images: Sequence[str | Path]) -> InputBatch:
 
@@ -152,7 +155,7 @@ class UniForge3DImageTo3DPipeline:
         """Encode once per resolution and share 512px features across stages."""
         with self._use_models(self.dino):
             images512 = batch.dino_images512.to(self.device, dtype=torch.float32)
-            with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+            with autocast_for_device(self.device, torch.bfloat16):
                 structure_features = self.dino(images512).cpu()
                 shape1024_features = self.dino(
                     batch.dino_images1024.to(self.device, dtype=torch.float32)
@@ -177,7 +180,7 @@ class UniForge3DImageTo3DPipeline:
         ).to(self.device)
         with self._use_models(self.structure_model):
             vggt_images = batch.vggt_images.to(self.device)
-            with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+            with autocast_for_device(self.device, torch.bfloat16):
                 latent = sample_sparse_structure(
                     self.structure_model,
                     noise,
@@ -351,7 +354,7 @@ class UniForge3DImageTo3DPipeline:
 
         batch = self._preprocess_images(images)
 
-        torch.cuda.set_device(self.device)
+        select_current_device(self.device)
         torch.manual_seed(seed)
         try:
             # Share one DINO model while preserving each stage's original precision.
@@ -379,4 +382,4 @@ class UniForge3DImageTo3DPipeline:
             )
             return export_glb(textured_mesh, output_path, overwrite=overwrite)
         finally:
-            release_cuda()
+            release_device(self.device)
