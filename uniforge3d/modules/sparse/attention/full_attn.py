@@ -81,6 +81,10 @@ def sparse_scaled_dot_product_attention(q: torch.Tensor, k: VarLenTensor, v: Var
     ...
 
 def sparse_scaled_dot_product_attention(*args, **kwargs):
+    if config.ATTN == 'sdpa':
+        from .sdpa import sparse_sdpa
+        return sparse_sdpa(*args, **kwargs)
+
     arg_names_dict = {
         1: ['qkv'],
         2: ['q', 'kv'],

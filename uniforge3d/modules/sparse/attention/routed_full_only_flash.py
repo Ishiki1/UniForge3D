@@ -1,27 +1,35 @@
-"""Packed Full-only routed cross-attention backed by FlashAttention varlen."""
+"""Checkpoint-compatible Full-only routed cross-attention (Flash or SDPA)."""
 from __future__ import annotations
 
 from typing import Dict
+from numbers import Integral
+from math import isqrt
 
 import torch
 import torch.nn as nn
 
 from ..basic import SparseTensor
+from .. import config
 from .modules import SparseMultiHeadRMSNorm
 
-try:
-    from flash_attn import flash_attn_varlen_func
-except Exception as exc:  # pragma: no cover - validated at startup on production nodes
-    flash_attn_varlen_func = None
-    _FLASH_IMPORT_ERROR = exc
-else:
-    _FLASH_IMPORT_ERROR = None
+
+def _flash_attention():
+    # Import only for the existing CUDA backend, never for operator-only SDPA.
+    try:
+        from flash_attn import flash_attn_varlen_func
+    except Exception as exc:  # pragma: no cover - production dependency
+        raise RuntimeError(
+            "flash_attn_varlen_func is required for routed Full-only attention"
+        ) from exc
+    return flash_attn_varlen_func
 
 
 class PackedRoutedFullOnlyLayoutBuilder:
     """Build one packed selected-view query layout shared by all routed layers."""
 
     def __init__(self, grid_resolution: int = 64) -> None:
+        if isinstance(grid_resolution, bool) or not isinstance(grid_resolution, Integral) or grid_resolution <= 0:
+            raise ValueError("grid_resolution must be a positive integer")
         self.grid_resolution = int(grid_resolution)
 
     @staticmethod
@@ -44,9 +52,27 @@ class PackedRoutedFullOnlyLayoutBuilder:
         views: int,
     ) -> Dict[str, torch.Tensor | int]:
         """Return the packed-query fields consumed directly by routed attention."""
+        if any(isinstance(n, bool) or not isinstance(n, Integral) or n <= 0 for n in (batch_size, views)):
+            raise ValueError("batch_size and views must be positive integers")
+        if not isinstance(x, SparseTensor):
+            raise TypeError("Routed queries must be a SparseTensor")
         coords = x.coords
         if coords.ndim != 2 or coords.shape[1] != 4:
             raise ValueError(f"Expected sparse coords [N,4], got {tuple(coords.shape)}")
+        if (coords.dtype not in (torch.int32, torch.int64) or coords.device != x.device
+                or len(coords) != len(x.feats)):
+            raise ValueError("Sparse coords must be integer and match query rows/device")
+        if not len(coords):
+            raise ValueError("Routed attention received no sparse queries")
+        expected_grid = (batch_size,) + (self.grid_resolution,) * 3
+        if (not isinstance(selected_view, torch.Tensor) or tuple(selected_view.shape) != expected_grid
+                or selected_view.dtype not in (torch.int32, torch.int64)
+                or selected_view.device != coords.device):
+            raise ValueError(f"selected_view must be an integer grid {expected_grid} on {coords.device}")
+        if torch.any((selected_view < 0) | (selected_view >= views)).item():
+            raise ValueError("selected_view contains a non-existent view")
+        if x.shape[0] != batch_size:
+            raise ValueError("Sparse query batch count disagrees with the view bank")
         xyz = coords[:, 1:].long()
         if xyz.numel() and (
             int(xyz.min().item()) < 0 or int(xyz.max().item()) >= self.grid_resolution
@@ -102,6 +128,71 @@ class PackedRoutedFullOnlyLayoutBuilder:
         }
 
 
+def _validate_sdpa_layout(x, context, batch, views, full_tokens):
+    """Reject malformed packing before indexing or projecting the view bank.
+
+    The prepared layout is bound to unchanged sparse rows and selected views;
+    the model must rebuild it when either changes (including CFG branches).
+    """
+    from .sdpa import validate_cumulative_lengths
+
+    count = len(x.feats)
+    if not count:
+        raise ValueError("Routed attention received no sparse queries")
+    if (x.coords.ndim != 2 or tuple(x.coords.shape) != (count, 4)
+            or x.coords.dtype not in (torch.int32, torch.int64) or x.coords.device != x.device
+            or x.shape[0] != batch):
+        raise ValueError("Sparse coordinates must match query rows/device and view-bank batches")
+    resolution = isqrt(full_tokens - 5)
+    if torch.any((x.coords[:, 1:] < 0) | (x.coords[:, 1:] >= resolution)).item():
+        raise ValueError("Sparse query coordinates are outside the routed grid")
+    indexes = {}
+    for name in ("routed_query_order", "routed_query_inverse", "routed_active_groups"):
+        value = context[name]
+        if (not isinstance(value, torch.Tensor) or value.ndim != 1
+                or value.dtype != torch.int64 or value.device != x.device):
+            raise ValueError(f"{name} must be an int64 vector on {x.device}")
+        indexes[name] = value
+    order, inverse, groups = (indexes[n] for n in (
+        "routed_query_order", "routed_query_inverse", "routed_active_groups"))
+    expected = torch.arange(count, device=x.device)
+    if len(order) != count or len(inverse) != count or not torch.equal(order.sort().values, expected):
+        raise ValueError("Routed order must be a complete query permutation")
+    if (torch.any((inverse < 0) | (inverse >= count)).item()
+            or not torch.equal(order[inverse], expected)):
+        raise ValueError("Routed inverse must invert the query order")
+    if (not len(groups) or torch.any((groups < 0) | (groups >= batch * views)).item()
+            or torch.any(groups[1:] <= groups[:-1]).item()):
+        raise ValueError("Active groups must be unique, increasing batch/view IDs in range")
+    qs = validate_cumulative_lengths(context["routed_cu_seqlens_q"], count,
+                                     name="routed_cu_seqlens_q", device=x.device)
+    ks = validate_cumulative_lengths(context["routed_cu_seqlens_k"], len(groups) * full_tokens,
+                                     name="routed_cu_seqlens_k", device=x.device)
+    if (len(qs) != len(groups) + 1 or len(ks) != len(groups) + 1
+            or any(a == b for a, b in zip(qs, qs[1:]))
+            or any(b - a != full_tokens for a, b in zip(ks, ks[1:]))):
+        raise ValueError("Routed boundaries must cover each active group with a complete view bank")
+    maximum = context["routed_max_seqlen_q"]
+    if (isinstance(maximum, bool) or not isinstance(maximum, Integral)
+            or maximum != max(b - a for a, b in zip(qs, qs[1:]))):
+        raise ValueError("routed_max_seqlen_q must match actual query lengths")
+    for group, a, b in zip(groups.tolist(), qs, qs[1:]):
+        if torch.any(x.coords[order[a:b], 0] != group // views).item():
+            raise ValueError("Routed query groups must preserve batch identity")
+    # The production prepared condition includes the original selected grid.
+    # Check it when present, so stale positive/negative layouts fail loudly.
+    if "selected_view" in context:
+        selected = context["selected_view"]
+        if (not isinstance(selected, torch.Tensor)
+                or tuple(selected.shape) != (batch, resolution, resolution, resolution)
+                or selected.dtype not in (torch.int32, torch.int64) or selected.device != x.device):
+            raise ValueError("selected_view must match the routed integer grid and device")
+        chosen = PackedRoutedFullOnlyLayoutBuilder._gather_grid(selected, x.coords)
+        for group, a, b in zip(groups.tolist(), qs, qs[1:]):
+            if torch.any(chosen[order[a:b]] != group % views).item():
+                raise ValueError("Prepared layout disagrees with selected_view; rebuild it after routing changes")
+
+
 class RoutedFullOnlyFlashCrossAttention(nn.Module):
     """Each query attends to all tokens of exactly one selected real view."""
 
@@ -116,7 +207,7 @@ class RoutedFullOnlyFlashCrossAttention(nn.Module):
         qk_rms_norm: bool = False,
     ) -> None:
         super().__init__()
-        if channels % num_heads:
+        if num_heads <= 0 or channels <= 0 or ctx_channels <= 0 or channels % num_heads:
             raise ValueError("channels must be divisible by num_heads")
         self.channels = int(channels)
         self.ctx_channels = int(ctx_channels)
@@ -125,10 +216,10 @@ class RoutedFullOnlyFlashCrossAttention(nn.Module):
         self.qk_rms_norm = bool(qk_rms_norm)
         if self.num_heads != 12 or self.head_dim != 128:
             raise ValueError("production Full-only Flash path requires 12 heads x 128")
-        if flash_attn_varlen_func is None:
-            raise RuntimeError(
-                "flash_attn_varlen_func is required for routed Full-only attention"
-            ) from _FLASH_IMPORT_ERROR
+        if config.ATTN == 'flash_attn':
+            _flash_attention()
+        elif config.ATTN != 'sdpa':
+            raise ValueError("Routed Full-only attention supports flash_attn or sdpa")
 
         self.to_q = nn.Linear(channels, channels, bias=qkv_bias)
         self.to_kv = nn.Linear(ctx_channels, channels * 2, bias=qkv_bias)
@@ -152,6 +243,13 @@ class RoutedFullOnlyFlashCrossAttention(nn.Module):
             raise ValueError(
                 f"Expected Full width {self.ctx_channels}, got {int(width)}"
             )
+        if config.ATTN == 'sdpa':
+            if self.full_tokens not in (1029, 4101):
+                raise ValueError("Routed SDPA requires the production 1029 or 4101 token bank")
+            if (full.device != x.device or full.dtype != x.dtype or x.feats.ndim != 2
+                    or x.feats.shape[1] != self.channels or batch <= 0 or views <= 0):
+                raise ValueError("Full bank and sparse queries must have matching device/dtype and valid shapes")
+            _validate_sdpa_layout(x, context, int(batch), int(views), self.full_tokens)
 
         q = self.to_q(x.feats).view(-1, self.num_heads, self.head_dim)
         if self.qk_rms_norm:
@@ -180,17 +278,26 @@ class RoutedFullOnlyFlashCrossAttention(nn.Module):
 
         k_packed = k.reshape(-1, self.num_heads, self.head_dim)
         v_packed = v.reshape(-1, self.num_heads, self.head_dim)
-        out_grouped = flash_attn_varlen_func(
-            q,
-            k_packed,
-            v_packed,
-            context["routed_cu_seqlens_q"],
-            context["routed_cu_seqlens_k"],
-            int(context["routed_max_seqlen_q"]),
-            self.full_tokens,
-            dropout_p=0.0,
-            softmax_scale=None,
-            causal=False,
-        )
+        if config.ATTN == 'sdpa':
+            from .sdpa import packed_sdpa
+            out_grouped = packed_sdpa(
+                q, k_packed, v_packed,
+                context["routed_cu_seqlens_q"], context["routed_cu_seqlens_k"],
+            )
+        elif config.ATTN == 'flash_attn':
+            out_grouped = _flash_attention()(
+                q,
+                k_packed,
+                v_packed,
+                context["routed_cu_seqlens_q"],
+                context["routed_cu_seqlens_k"],
+                int(context["routed_max_seqlen_q"]),
+                self.full_tokens,
+                dropout_p=0.0,
+                softmax_scale=None,
+                causal=False,
+            )
+        else:
+            raise ValueError("Routed Full-only attention supports flash_attn or sdpa")
         out = out_grouped[inverse]
         return x.replace(self.to_out(out.reshape(-1, self.channels)))
