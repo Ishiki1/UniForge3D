@@ -1,8 +1,6 @@
 from typing import *
 import torch
 from ..voxel import Voxel
-import cumesh
-from flex_gemm.ops.grid_sample import grid_sample_3d
 
 
 class Mesh:
@@ -33,8 +31,10 @@ class Mesh:
         return self.to('cpu')
     
     def fill_holes(self, max_hole_perimeter=3e-2):
-        vertices = self.vertices.cuda()
-        faces = self.faces.cuda()
+        import cumesh
+        device = self.device if self.device.type == 'mps' else torch.device('cuda')
+        vertices = self.vertices.to(device)
+        faces = self.faces.to(device)
         
         mesh = cumesh.CuMesh()
         mesh.init(vertices, faces)
@@ -57,8 +57,10 @@ class Mesh:
         self.faces = new_faces.to(self.device)
         
     def remove_faces(self, face_mask: torch.Tensor):
-        vertices = self.vertices.cuda()
-        faces = self.faces.cuda()
+        import cumesh
+        device = self.device if self.device.type == 'mps' else torch.device('cuda')
+        vertices = self.vertices.to(device)
+        faces = self.faces.to(device)
         
         mesh = cumesh.CuMesh()
         mesh.init(vertices, faces)
@@ -69,8 +71,10 @@ class Mesh:
         self.faces = new_faces.to(self.device)
         
     def simplify(self, target=1000000, verbose: bool=False, options: dict={}):
-        vertices = self.vertices.cuda()
-        faces = self.faces.cuda()
+        import cumesh
+        device = self.device if self.device.type == 'mps' else torch.device('cuda')
+        vertices = self.vertices.to(device)
+        faces = self.faces.to(device)
         
         mesh = cumesh.CuMesh()
         mesh.init(vertices, faces)
@@ -220,6 +224,7 @@ class MeshWithVoxel(Mesh, Voxel):
         )
         
     def query_attrs(self, xyz):
+        from flex_gemm.ops.grid_sample import grid_sample_3d
         grid = ((xyz - self.origin) / self.voxel_size).reshape(1, -1, 3)
         vertex_attrs = grid_sample_3d(
             self.attrs,

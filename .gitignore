@@ -18,3 +18,4 @@ __pycache__/
 /dist/
 *.egg-info/
 /.deps/
+/.venv-mac/

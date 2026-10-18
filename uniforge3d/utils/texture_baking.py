@@ -6,9 +6,8 @@ import cv2
 from PIL import Image
 import trimesh
 import trimesh.visual
-from flex_gemm.ops.grid_sample import grid_sample_3d
-import nvdiffrast.torch as dr
-import cumesh
+from .sparse_texture import SparseTextureSampler
+from .mesh_device import remesh_narrow_band_dc
 
 
 def to_glb(
@@ -57,6 +56,23 @@ def to_glb(
         verbose: whether to print verbose messages
         use_tqdm: whether to use tqdm to display progress bar
     """
+    device = vertices.device
+    if device.type == "cpu":
+        device = attr_volume.device if attr_volume.device.type in ("cuda", "mps") else torch.device("cuda")
+    if device.type == "mps":
+        import mtldiffrast.torch as dr
+    elif device.type == "cuda":
+        import nvdiffrast.torch as dr
+        from flex_gemm.ops.grid_sample import grid_sample_3d
+    else:
+        raise ValueError("Texture baking requires explicit CUDA or MPS tensors")
+    import cumesh
+    # Native Metal interfaces require float32 positions/materials and int32 faces.
+    vertices = vertices.to(device=device, dtype=torch.float32).contiguous()
+    faces = faces.to(device=device, dtype=torch.int32).contiguous()
+    coords = coords.to(device=device, dtype=torch.int32).contiguous()
+    if device.type == "mps":
+        attr_volume = attr_volume.to(device=device, dtype=torch.float32).contiguous()
     # --- Input Normalization (AABB, Voxel Size, Grid Size) ---
     if isinstance(aabb, (list, tuple)):
         aabb = np.array(aabb)
@@ -66,6 +82,7 @@ def to_glb(
     assert aabb.dim() == 2, f"aabb must be a 2D tensor, but got {aabb.shape}"
     assert aabb.size(0) == 2, f"aabb must have 2 rows, but got {aabb.size(0)}"
     assert aabb.size(1) == 3, f"aabb must have 3 columns, but got {aabb.size(1)}"
+    aabb = aabb.to(device=device, dtype=torch.float32)
 
     # Calculate grid dimensions based on AABB and voxel size
     if voxel_size is not None:
@@ -75,6 +92,7 @@ def to_glb(
             voxel_size = np.array(voxel_size)
         if isinstance(voxel_size, np.ndarray):
             voxel_size = torch.tensor(voxel_size, dtype=torch.float32, device=coords.device)
+        voxel_size = voxel_size.to(device=device, dtype=torch.float32)
         grid_size = ((aabb[1] - aabb[0]) / voxel_size).round().int()
     else:
         assert grid_size is not None, "Either voxel_size or grid_size must be provided"
@@ -84,6 +102,7 @@ def to_glb(
             grid_size = np.array(grid_size)
         if isinstance(grid_size, np.ndarray):
             grid_size = torch.tensor(grid_size, dtype=torch.int32, device=coords.device)
+        grid_size = grid_size.to(device=device, dtype=torch.int32)
         voxel_size = (aabb[1] - aabb[0]) / grid_size
     
     # Assertions for dimensions
@@ -97,9 +116,9 @@ def to_glb(
     if verbose:
         print(f"Original mesh: {vertices.shape[0]} vertices, {faces.shape[0]} faces")
 
-    # Move data to GPU
-    vertices = vertices.cuda()
-    faces = faces.cuda()
+    aabb = aabb.to(device=device, dtype=torch.float32)
+    voxel_size = voxel_size.to(device=device, dtype=torch.float32)
+    grid_size = grid_size.to(device=device, dtype=torch.int32)
     
     # Initialize CUDA mesh handler
     mesh = cumesh.CuMesh()
@@ -111,6 +130,8 @@ def to_glb(
     if verbose:
         print(f"After filling holes: {mesh.num_vertices} vertices, {mesh.num_faces} faces")
     vertices, faces = mesh.read()
+    vertices = vertices.to(device=device, dtype=torch.float32).contiguous()
+    faces = faces.to(device=device, dtype=torch.int32).contiguous()
     if use_tqdm:
         pbar.update(1)
         
@@ -168,7 +189,7 @@ def to_glb(
         resolution = grid_size.max().item()
         
         # Perform Dual Contouring remeshing (rebuilds topology)
-        mesh.init(*cumesh.remeshing.remesh_narrow_band_dc(
+        mesh.init(*remesh_narrow_band_dc(
             vertices, faces,
             center = center,
             scale = (resolution + 3 * remesh_band) / resolution * scale,
@@ -208,12 +229,12 @@ def to_glb(
         return_vmaps=True,
         verbose=verbose,
     )
-    out_vertices = out_vertices.cuda()
-    out_faces = out_faces.cuda()
-    out_uvs = out_uvs.cuda()
-    out_vmaps = out_vmaps.cuda()
+    out_vertices = out_vertices.to(device=device, dtype=torch.float32).contiguous()
+    out_faces = out_faces.to(device=device, dtype=torch.int32).contiguous()
+    out_uvs = out_uvs.to(device=device, dtype=torch.float32).contiguous()
+    out_vmaps = out_vmaps.to(device=device, dtype=torch.long)
     mesh.compute_vertex_normals()
-    out_normals = mesh.read_vertex_normals()[out_vmaps]
+    out_normals = mesh.read_vertex_normals().to(device=device, dtype=torch.float32)[out_vmaps]
     
     if use_tqdm:
         pbar.update(1)
@@ -227,10 +248,10 @@ def to_glb(
         print("Sampling attributes...", end='', flush=True)
         
     # Setup differentiable rasterizer context
-    ctx = dr.RasterizeCudaContext()
+    ctx = dr.MtlRasterizeContext() if device.type == "mps" else dr.RasterizeCudaContext(device=device)
     # Prepare UV coordinates for rasterization (rendering in UV space)
     uvs_rast = torch.cat([out_uvs * 2 - 1, torch.zeros_like(out_uvs[:, :1]), torch.ones_like(out_uvs[:, :1])], dim=-1).unsqueeze(0)
-    rast = torch.zeros((1, texture_size, texture_size, 4), device='cuda', dtype=torch.float32)
+    rast = torch.zeros((1, texture_size, texture_size, 4), device=device, dtype=torch.float32)
     
     # Rasterize in chunks to save memory
     for i in range(0, out_faces.shape[0], 100000):
@@ -256,14 +277,18 @@ def to_glb(
     valid_pos = (orig_tri_verts * uvw.unsqueeze(-1)).sum(dim=1)
     
     # Trilinear sampling from the attribute volume (Color, Material props)
-    attrs = torch.zeros(texture_size, texture_size, attr_volume.shape[1], device='cuda')
-    attrs[mask] = grid_sample_3d(
-        attr_volume,
-        torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1),
-        shape=torch.Size([1, attr_volume.shape[1], *grid_size.tolist()]),
-        grid=((valid_pos - aabb[0]) / voxel_size).reshape(1, -1, 3),
-        mode='trilinear',
-    )
+    attrs = torch.zeros(texture_size, texture_size, attr_volume.shape[1], device=device)
+    if device.type == "mps":
+        sampler = SparseTextureSampler(attr_volume, coords, grid_size)
+        attrs[mask] = sampler((valid_pos - aabb[0]) / voxel_size)
+    else:
+        attrs[mask] = grid_sample_3d(
+            attr_volume,
+            torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1),
+            shape=torch.Size([1, attr_volume.shape[1], *grid_size.tolist()]),
+            grid=((valid_pos - aabb[0]) / voxel_size).reshape(1, -1, 3),
+            mode='trilinear',
+        )
     if use_tqdm:
         pbar.update(1)
     if verbose:

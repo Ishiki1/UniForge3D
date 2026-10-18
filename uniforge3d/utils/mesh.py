@@ -8,10 +8,11 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-import cumesh
 import numpy as np
 import torch
 import trimesh
+from .device import release_device
+from .mesh_device import remesh_narrow_band_dc
 
 
 def export_glb(mesh: trimesh.Trimesh, path: Path, *, overwrite: bool) -> Path:
@@ -42,6 +43,7 @@ def official_shape_only_postprocess(
     remesh_project: float,
 ) -> trimesh.Trimesh:
     """TRELLIS.2 example.py/to_glb geometry path without UV or texture work."""
+    import cumesh
     mesh = cumesh.CuMesh()
     mesh.init(vertices, faces)
     mesh.simplify(pre_simplify_target, verbose=False)
@@ -55,15 +57,17 @@ def official_shape_only_postprocess(
             RuntimeWarning,
         )
         del mesh
-        torch.cuda.empty_cache()
+        release_device(vertices.device)
         mesh = cumesh.CuMesh()
         mesh.init(vertices, faces)
         mesh.simplify(pre_simplify_target, verbose=False)
     filled_vertices, filled_faces = mesh.read()
+    filled_vertices = filled_vertices.to(device=vertices.device, dtype=torch.float32).contiguous()
+    filled_faces = filled_faces.to(device=vertices.device, dtype=torch.int32).contiguous()
     bvh = cumesh.cuBVH(filled_vertices, filled_faces)
     scale = (grid_size + 3 * remesh_band) / grid_size
     mesh.init(
-        *cumesh.remeshing.remesh_narrow_band_dc(
+        *remesh_narrow_band_dc(
             filled_vertices,
             filled_faces,
             center=torch.zeros(3, device=vertices.device, dtype=vertices.dtype),

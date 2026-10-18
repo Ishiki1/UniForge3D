@@ -1,0 +1,14 @@
+diff --git a/src/metal_bvh.mm b/src/metal_bvh.mm
+index f00b62a..d81b974 100644
+--- a/src/metal_bvh.mm
++++ b/src/metal_bvh.mm
+@@ -155,6 +155,9 @@ static void dispatch_query(id<MTLDevice> dev, id<MTLCommandQueue> queue,
+         auto* stream = at::mps::getCurrentMPSStream();
+         at::mps::dispatch_sync_with_rethrow(stream->queue(), ^() {
+             @autoreleasepool {
++                // PyTorch may still own an open coalesced compute encoder.
++                // Close it before creating our encoder on the same buffer.
++                stream->endKernelCoalescing();
+                 id<MTLCommandBuffer> cmdBuf = stream->commandBuffer();
+                 id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+                 [enc setComputePipelineState:pso];
