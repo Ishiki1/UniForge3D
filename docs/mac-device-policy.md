@@ -2,9 +2,9 @@
 
 This adapter cut makes device selection and conditioning precision explicit and
 provides a real-valued RoPE path for MPS. It does not establish that the full
-geometry-and-material pipeline runs. Model weights, conditioning outputs on real
-images, native RoPE behavior, sparse/mesh dependencies and complete inference
-require their own execution evidence.
+geometry-and-material pipeline runs. Complete inference and generated asset quality require their own execution
+evidence. The component results below separate native operator checks from
+trained visual-encoder inference.
 
 ## Selecting a device
 
@@ -118,3 +118,35 @@ checks verify their helper wiring and unchanged CPU noise generation. The prior
 attention-only MPS proof does not cover these new device/RoPE changes. A separate
 bounded native probe and independent source review are required before claiming
 native compatibility for this cut.
+
+## Bounded native and pretrained component evidence
+
+On 18 October 2026 a separate supervised MPS probe passed 12 model-operation
+cases: dense and sparse RoPE plus an actual small structure-model transfer and
+forward in float32/float16/bfloat16, and native sparse-convolution cases. The
+RoPE reference uses 12 heads by 128 dimensions; convolution checks include
+missing neighbors and reuse with changed features. The small model uses random
+weights and preserves its CPU checkpoint through CPU/MPS/CPU transfer. This
+is component evidence, not a trained structure-model result.
+
+The unchanged public DINOv3 encoder also loaded Meta's original ViT-L/16
+LVD-1689M snapshot `ea8dc2863c51be0a264bab82070e3e8836b02d51`. All 415 tensor
+keys/shapes/dtypes and eight exact tensor sentinels matched the SafeTensors
+checkpoint. Four-view 128-pixel CPU and MPS fp32 features agreed with maximum
+absolute error 0.00009871 and RMS error 0.000003258. Four-dimensional/five-
+dimensional reshape paths agreed exactly. Separate bf16-autocast MPS runs at
+512 and 1024 retained all four views, all 24 layers, five special tokens and
+all patch tokens, returning finite float32 banks of shape `[1,4,1029,1024]`
+and `[1,4,4101,1024]`. Learned HF final normalization and HF model.forward were
+excluded by observation hooks; the public non-affine normalization remained.
+These use synthetic images; full-size CPU/CUDA parity and asset quality were
+not tested. Each fresh process ran with generic fallback disabled, offline
+weights, source/checkpoint hashes before and after, and a 120-second supervisor.
+
+BRIA RMBG-2.0 revision `5df4c9c76d8170882c34f6986e848ee07fd0ba43` also passed
+strict local SafeTensors loading and one real 1024-pixel image inference on
+MPS in fp32. Its 20 deformable-convolution modules were observed on MPS; the
+installed torchvision 0.27 operator independently matched CPU on two small
+fixtures. The original full-resolution, multiscale, non-SDPA model settings
+were retained. This establishes execution on this stack, not segmentation
+quality across arbitrary images or complete UniForge inference.

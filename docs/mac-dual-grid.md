@@ -30,8 +30,8 @@ Coordinates and flags are copied to CPU. NumPy constructs sorted sparse keys,
 enumerates active edges in row/axis order, and resolves neighbors in chunks.
 The resulting int32 indices return to the original device. Vertex arithmetic
 and split decisions run in PyTorch on that device. This is an explicit CPU
-boundary, not generic MPS fallback; native MPS compatibility needs its own
-bounded execution proof. CPU-only float64 parity is not a native MPS dtype claim.
+boundary, not generic MPS fallback. Bounded native MPS evidence is recorded
+below; CPU-only float64 parity is not a native MPS dtype claim.
 
 ## Memory scope
 
@@ -70,6 +70,31 @@ heuristic behavior and chunk invariance. This suite executes only CPU work.
 Candidate author run on 18 October 2026: **77 passed in 3.49 seconds**, exit 0,
 using Python 3.11 / PyTorch 2.12 with one intra-op/inter-op CPU thread. Native GPU
 package imports were blocked in the test runner. This is CPU evidence only.
+
+## Bounded native verification
+
+On 18 October 2026 the integrated adapter passed **30 MPS cases and 87 exact
+chunk comparisons** across float32, float16 and bfloat16 inputs. Returned
+vertices are float32 and faces int32, on MPS. The tests exercised the exact
+small decoder dispatcher through an isolated AST import boundary, calling the
+real adapter with MPS tensors; they did not construct a trained decoder.
+
+A separate literal dictionary oracle was checked against the pinned upstream
+CPU implementation on every small case. Fixtures cover both weighted splits,
+strict ties, the preserved three-quad and degenerate angle heuristics, empty
+and inactive rows, anisotropic grids, shuffled holes/boundaries, voxel-size
+precedence and chunk invariance. Dyadic coordinates/weights make exact vertex
+comparisons meaningful for these fixtures. The logical 1024 cubed case uses
+4,096 boundary-plane rows and 7,938 triangles; it uses the dictionary oracle
+without allocating the upstream 8 GiB dense table. This is not a full-scale
+decoder or production-memory proof.
+
+The native process used PyTorch 2.12 on Apple Silicon, generic fallback disabled,
+one CPU thread and an external 120-second supervisor. It completed in 1.84
+seconds including startup, with unchanged source hashes, exit 0 and confirmed
+process/lock release. Peak process RSS was 288,309,248 bytes; this is not GPU peak
+memory. No full trained geometry, CUDA-equivalence or completed asset claim
+follows from this test.
 
 ## Attribution
 
