@@ -16,7 +16,15 @@ from .sparse_unet import (
     SparseUnetVaeDecoder,
 )
 from ...representations import Mesh
-from o_voxel.convert import flexible_dual_grid_to_mesh
+
+
+def _flexible_dual_grid_to_mesh(coords: torch.Tensor, *args, **kwargs):
+    """Use explicit host topology on MPS; retain the original other-device path."""
+    if coords.device.type == 'mps':
+        from ...utils.mac_dual_grid import mac_flexible_dual_grid_to_mesh as extract
+    else:
+        from o_voxel.convert import flexible_dual_grid_to_mesh as extract
+    return extract(coords, *args, **kwargs)
 
 
 class FlexiDualGridVaeDecoder(SparseUnetVaeDecoder):
@@ -56,7 +64,7 @@ class FlexiDualGridVaeDecoder(SparseUnetVaeDecoder):
         vertices = h.replace((1 + 2 * self.voxel_margin) * F.sigmoid(h.feats[..., 0:3]) - self.voxel_margin)
         intersected = h.replace(h.feats[..., 3:6] > 0)
         quad_lerp = h.replace(F.softplus(h.feats[..., 6:7]))
-        mesh = [Mesh(*flexible_dual_grid_to_mesh(
+        mesh = [Mesh(*_flexible_dual_grid_to_mesh(
             v.coords[:, 1:], v.feats, i.feats, q.feats,
             aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
             grid_size=self.resolution,
