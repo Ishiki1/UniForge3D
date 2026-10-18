@@ -150,3 +150,26 @@ installed torchvision 0.27 operator independently matched CPU on two small
 fixtures. The original full-resolution, multiscale, non-SDPA model settings
 were retained. This establishes execution on this stack, not segmentation
 quality across arbitrary images or complete UniForge inference.
+
+The same original BRIA/public preprocessing and DINO paths subsequently prepared
+four real prop views. Both DINO banks were saved as exact CPU float32 tensors,
+with all views/tokens retained and source/input/weight hashes checked before
+and after. Encoder forward did not change either CPU or MPS RNG state.
+
+The full trained Stage1 joint structure model also passed original strict
+base/LoRA/trainable-weight loading: **2,460,456,876 FP32 parameters**. A load-only
+process completed in 33.05 seconds. Separate real-input conditional and
+unconditional predictions at the original seed 42 and first timestep passed
+in 38.14 and 28.61 seconds including imports, loading and integrity checks.
+The synchronized forwards took 7.33 and 1.45 seconds. Observations retained
+all 30 DiT blocks and, for the conditional branch, all 24 frame/global VGGT
+blocks, full four-view contexts and native bf16 projections. Outputs were
+finite bf16 tensors of shape `[1,8,16,16,16]`.
+
+These are full trained component predictions, **not completed sampler steps,
+occupancy, a generated mesh or a finished PBR asset**. Full trained CPU/CUDA
+prediction parity was not tested. Each run used the supervised short-resource
+lease, offline local weights and disabled generic MPS fallback. Process peak
+RSS was about 17.51 GB; it is not a GPU peak measurement. An initial probe-only
+optional-library discovery error was corrected before these successful runs;
+no model math changed to resolve it.
