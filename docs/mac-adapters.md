@@ -135,13 +135,21 @@ query lengths; multi-batch/view isolation; distinct CFG zero-view routing;
 Q/K normalization and projection bias combinations; strict synthetic state-dict
 loading against the existing cross-attention class; and fresh-process imports
 with FlashAttention genuinely absent. The four-view special-token fixture
-uses the actual public sparse cross-attention API.
+uses the actual public sparse cross-attention API with 56 queries and unique
+channels for every view, all five special tokens of every view, and each view's
+first/last patch tokens. Grid64 exercises the default 55+1 query split, retaining
+all 16,404 keys in both calls. Thirty-three intentional key-omission mutants per
+grid (each individual view, the middle two views, and each individual marker
+token) must fail the same independent oracle assertion. The initial symmetric
+fixture could falsely pass when the middle two views were dropped; independent
+review caught that evidence defect, and this stronger fixture replaces it.
 
 Author environment on 18 October 2026: Python 3.11.15, PyTorch 2.12.0,
 pytest 9.0.3, macOS 26.6.2 arm64. The eight main routed oracle cases measured
 maximum absolute output error from `8.94069672e-7` to `1.37090683e-6`; the
 largest per-row L2 error was `1.01698202e-5`. Exact test-run result is recorded
-with the candidate commit's review handoff: **113 passed in 2.81s**, exit 0.
+with the revised candidate's review handoff: **113 passed in 2.97s**, exit 0,
+including all 66 deliberate key-omission mutant rejections across the two grids.
 `git diff --check` also passed. The first draft's 64 MiB default
 correctly refused grid64; the final 512 MiB setting also covers the four-view
 production all-view case. That refusal was corrected by an explicit budget

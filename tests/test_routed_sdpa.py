@@ -147,14 +147,62 @@ def test_routed_view_batch_isolation_and_cfg_zero_layout(resolution, monkeypatch
 
 @pytest.mark.parametrize('resolution', [32, 64])
 def test_all_view_full_cross_attention_retains_special_tokens(resolution, monkeypatch):
-    monkeypatch.setattr(config, 'SDPA_QUERY_CHUNK_SIZE', 1)
+    import uniforge3d.modules.sparse.attention.sdpa as helper
+
+    # Keep the production defaults: grid64 must split these 56 queries 55+1.
+    assert config.SDPA_QUERY_CHUNK_SIZE == 256
+    assert config.SDPA_SCORE_WORKSPACE_BYTES == 512 * 1024**2
     length = resolution**2 + 5
-    # All-view blocks use the public sparse operator, including every special token.
-    q = torch.zeros(1, 12, 128)
-    kv = torch.zeros(1, 4 * length, 2, 12, 128)
-    kv[:, [i * length + j for i in range(4) for j in (0, length-1)], 1] = 7
+    total = 4 * length
+    q = torch.zeros(56, 12, 128)
+    kv = torch.zeros(1, total, 2, 12, 128)
+    expected = torch.zeros_like(q, dtype=torch.float64)
+    marker_positions = []
+    for view in range(4):
+        # A distinct channel for EACH of the five leading special tokens,
+        # the first patch token and the last patch token of EACH view.
+        for slot, offset in enumerate((0, 1, 2, 3, 4, 5, length - 1)):
+            channel = view * 7 + slot
+            position = view * length + offset
+            kv[0, position, 1, :, channel] = total * (channel + 1)
+            expected[..., channel] = channel + 1
+            marker_positions.append(position)
+        # A whole-view signature also detects omission independently of markers.
+        kv[0, view * length:(view + 1) * length, 1, :, 28 + view] = 4 * (view + 1)
+        expected[..., 28 + view] = view + 1
+
+    calls = []
+    original = helper.F.scaled_dot_product_attention
+    def recording(q, k, v, **kwargs):
+        calls.append((q.shape[-2], k.shape[-2]))
+        return original(q, k, v, **kwargs)
+    monkeypatch.setattr(helper.F, 'scaled_dot_product_attention', recording)
     out = sp.sparse_scaled_dot_product_attention(sp.VarLenTensor(q), kv).feats
-    compare(out, torch.full_like(out.double(), 56 / (4 * length)))
+    compare(out, expected)
+    assert calls == ([(55, total), (1, total)] if resolution == 64 else [(56, total)])
+
+    # Execute the actual public operator with an intentionally faulty native
+    # call. The SAME oracle assertion must reject each removed view, the middle
+    # two views together, and every individual special/boundary token. One
+    # query per mutant is sufficient; only the baseline needs the 55+1 edge.
+    positions = torch.arange(total)
+    omitted_sets = [
+        positions[(positions // length) == view] for view in range(4)
+    ] + [positions[(positions // length == 1) | (positions // length == 2)]]
+    omitted_sets += [torch.tensor([position]) for position in marker_positions]
+    for omitted in omitted_sets:
+        keep_mask = torch.ones(total, dtype=torch.bool)
+        keep_mask[omitted] = False
+        kept = positions[keep_mask]
+        def dropping(q, k, v, **kwargs):
+            return original(q, k.index_select(-2, kept), v.index_select(-2, kept), **kwargs)
+        monkeypatch.setattr(helper.F, 'scaled_dot_product_attention', dropping)
+        mutant = sp.sparse_scaled_dot_product_attention(sp.VarLenTensor(q[:1]), kv).feats
+        assert torch.isfinite(mutant).all()
+        with pytest.raises(AssertionError):
+            compare(mutant, expected[:1])
+    print(f'all-view grid={resolution}: keys={total}, chunks={calls}, '
+          f'{len(omitted_sets)} key-omission mutants rejected')
 
 
 @pytest.mark.parametrize('resolution', [32, 64])
