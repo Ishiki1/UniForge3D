@@ -7,6 +7,53 @@ import math
 import torch
 
 
+def _scatter_reduce_int64_cpu_(destination, index, source, *, reduce):
+    """Exact CPU boundary for MPS int64 extrema; preserve in-place destination.
+
+    MPS does not implement int64 scatter_reduce_. All values, including the
+    initialized destination and tie-breaking sentinels, stay int64 throughout.
+    Only this reduction crosses devices; the complete result returns to the
+    original tensor. This is not a generic unsupported-operation fallback.
+    """
+    if reduce not in ("amin", "amax"):
+        raise ValueError("Router integer reduction must be amin or amax")
+    if destination.dtype != torch.int64 or source.dtype != torch.int64 or index.dtype != torch.int64:
+        raise TypeError("Router integer reduction requires int64 tensors")
+    result = destination.to(device="cpu", copy=True)
+    result.scatter_reduce_(
+        0, index.to(device="cpu"), source.to(device="cpu"),
+        reduce=reduce, include_self=True,
+    )
+    destination.copy_(result.to(device=destination.device))
+    return destination
+
+
+def _scatter_reduce_extrema_(destination, index, source, *, reduce):
+    if destination.device.type == "mps" and destination.dtype == torch.int64:
+        return _scatter_reduce_int64_cpu_(destination, index, source, reduce=reduce)
+    return destination.scatter_reduce_(0, index, source, reduce=reduce, include_self=True)
+
+
+def _unique_consecutive_int64_cpu(key):
+    """Preserve complete packed keys and run grouping across the MPS boundary.
+
+    The affected MPS unique_consecutive implementation narrows int64 inputs to
+    int32 internally. A 64-grid/four-view key can exceed 2**31 even for batch 1.
+    Keep the original operation in int64 on CPU and return all three outputs to
+    the key's device, preserving key order, inverse indices and exact counts.
+    """
+    if key.dtype != torch.int64 or key.ndim != 1:
+        raise TypeError("Packed router keys must be a one-dimensional int64 tensor")
+    result = torch.unique_consecutive(key.to(device="cpu"), return_inverse=True, return_counts=True)
+    return tuple(value.to(device=key.device) for value in result)
+
+
+def _unique_consecutive_packed_keys(key):
+    if key.device.type == "mps" and key.dtype == torch.int64:
+        return _unique_consecutive_int64_cpu(key)
+    return torch.unique_consecutive(key, return_inverse=True, return_counts=True)
+
+
 class GPUVoxelViewRouter:
     """Route each target voxel to one full image, without local-window computation.
 
@@ -99,7 +146,7 @@ class GPUVoxelViewRouter:
 
         order = torch.argsort(key, stable=True)
         key, conf = key[order], conf[order]
-        unique, inverse, counts = torch.unique_consecutive(key, return_inverse=True, return_counts=True)
+        unique, inverse, counts = _unique_consecutive_packed_keys(key)
         return {
             "key": unique,
             "group": unique // self.patch_count,
@@ -161,7 +208,7 @@ class GPUVoxelViewRouter:
 
         root_support = component_pixels[roots]
         max_support = torch.full((num_groups,), -1, dtype=root_support.dtype, device=key.device)
-        max_support.scatter_reduce_(0, root_group_ids, root_support, reduce="amax", include_self=True)
+        _scatter_reduce_extrema_(max_support, root_group_ids, root_support, reduce="amax")
         support_winner = root_support == max_support[root_group_ids]
 
         root_mean = component_conf[roots] / root_support.clamp_min(1)
@@ -176,12 +223,11 @@ class GPUVoxelViewRouter:
         root_winner = support_winner & (root_mean == max_mean[root_group_ids])
         root_sentinel = torch.full_like(roots, num_entries)
         chosen_roots = torch.full((num_groups,), num_entries, dtype=roots.dtype, device=key.device)
-        chosen_roots.scatter_reduce_(
-            0,
+        _scatter_reduce_extrema_(
+            chosen_roots,
             root_group_ids,
             torch.where(root_winner, roots, root_sentinel),
             reduce="amin",
-            include_self=True,
         )
 
         return {
@@ -217,14 +263,14 @@ class GPUVoxelViewRouter:
         source_anchor = (view == 0).long()
 
         support = torch.zeros(total, dtype=source_support.dtype, device=device)
-        support.scatter_reduce_(0, dense, source_support, reduce="amax", include_self=True)
+        _scatter_reduce_extrema_(support, dense, source_support, reduce="amax")
         support_winner = source_support == support[dense]
 
         anchor = torch.full((total,), -1, dtype=source_anchor.dtype, device=device)
-        anchor.scatter_reduce_(
-            0, dense,
+        _scatter_reduce_extrema_(
+            anchor, dense,
             torch.where(support_winner, source_anchor, torch.full_like(source_anchor, -1)),
-            reduce="amax", include_self=True,
+            reduce="amax",
         )
         anchor_winner = support_winner & (source_anchor == anchor[dense])
 
@@ -236,10 +282,10 @@ class GPUVoxelViewRouter:
         )
         conf_winner = anchor_winner & (source_conf == mean_conf[dense])
         selected_view.fill_(views)
-        selected_view.scatter_reduce_(
-            0, dense,
+        _scatter_reduce_extrema_(
+            selected_view, dense,
             torch.where(conf_winner, view, torch.full_like(view, views)),
-            reduce="amin", include_self=True,
+            reduce="amin",
         )
         has_support = selected_view < views
 
